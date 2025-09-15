@@ -1,227 +1,53 @@
 import streamlit as st
 import pandas as pd
-import google.generativeai as genai
-import os
-from dotenv import load_dotenv
 from pathlib import Path
 from io import StringIO
-import time
 import re
-import altair as alt
-import numpy as np
 import json
+from core.config import configure_environment, configure_page, get_gemini_model
+from ui.styles import inject_custom_css
+from services.state import ensure_defaults
+from services.data_io import save_uploaded_once, load_dataframe_from_saved
+from services.viz import create_enhanced_chart
 
-load_dotenv()
+configure_environment()
+configure_page()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-genai.configure(api_key=GEMINI_API_KEY)
+inject_custom_css()
 
-st.set_page_config(page_title="CSV/Excel Uploader with Gemini Chat", layout="wide")
+st.title("🧠 Data Analyzer Agent")
 
-# Custom CSS for better UI
-st.markdown("""
-<style>
-    .suggestion-button {
-        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        border-radius: 10px;
-        padding: 10px 15px;
-        margin: 5px;
-        border: none;
-        cursor: pointer;
-        transition: all 0.3s ease;
-    }
-    .suggestion-button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-    }
-    .chat-container {
-        background: #f8f9fa;
-        border-radius: 15px;
-        padding: 20px;
-        margin: 10px 0;
-    }
-    .suggestion-container {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        border-radius: 15px;
-        padding: 20px;
-        color: white;
-        margin-bottom: 20px;
-    }
-    .metric-card {
-        background: white;
-        border-radius: 10px;
-        padding: 15px;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-    }
-    .stExpander > div:first-child {
-        background: linear-gradient(90deg, #4facfe 0%, #00f2fe 100%);
-        color: white;
-        border-radius: 10px;
-    }
-    .export-dropdown {
-        position: relative;
-        display: inline-block;
-    }
-    .export-dropdown-content {
-        display: none;
-        position: absolute;
-        background-color: #f9f9f9;
-        min-width: 160px;
-        box-shadow: 0px 8px 16px 0px rgba(0,0,0,0.2);
-        z-index: 1;
-        border-radius: 8px;
-    }
-    .export-dropdown:hover .export-dropdown-content {
-        display: block;
-    }
-    .export-dropdown-content a {
-        color: black;
-        padding: 12px 16px;
-        text-decoration: none;
-        display: block;
-        border-radius: 8px;
-    }
-    .export-dropdown-content a:hover {
-        background-color: #f1f1f1;
-    }
-    
-    /* Enhanced chart styling */
-    .chart-container {
-        background: white;
-        border-radius: 15px;
-        padding: 20px;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.1);
-        margin: 15px 0;
-        border: 1px solid #e0e0e0;
-    }
-    
-    .chart-title {
-        font-size: 18px;
-        font-weight: bold;
-        color: #2c3e50;
-        margin-bottom: 10px;
-        text-align: center;
-    }
-
-    .suggestions-section {
-        position: sticky;
-        top: 0;
-        background: white;
-        z-index: 100;
-        padding: 20px 0;
-        border-bottom: 2px solid #f0f0f0;
-        margin-bottom: 20px;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-st.title("📊 CSV/Excel Uploader with Gemini AI Assistant")
-
-# --- Session state defaults ---
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "chat_session" not in st.session_state:
-    st.session_state.chat_session = None
-if "last_result" not in st.session_state:
-    st.session_state.last_result = None
-if "explanations" not in st.session_state:
-    st.session_state.explanations = {}
-if "saved_file_path" not in st.session_state:
-    st.session_state.saved_file_path = None
-if "uploaded_file_name" not in st.session_state:
-    st.session_state.uploaded_file_name = None
-if "last_loaded_path" not in st.session_state:
-    st.session_state.last_loaded_path = None
-if "df" not in st.session_state:
-    st.session_state.df = None
-if "query_suggestions" not in st.session_state:
-    st.session_state.query_suggestions = []
-if "suggestions_generated" not in st.session_state:
-    st.session_state.suggestions_generated = False
-if "processing_suggestion" not in st.session_state:
-    st.session_state.processing_suggestion = False
+ensure_defaults()
 
 
 # --- File uploader (CSV / Excel) ---
 uploaded_file = st.file_uploader("Choose a CSV or Excel file", type=["csv", "xls", "xlsx"]) 
 
 if uploaded_file is not None:
-    # Save the uploaded file only once per upload (prevent duplicate saves on every rerun)
-    if (st.session_state.saved_file_path is None) or (st.session_state.uploaded_file_name != uploaded_file.name):
-        try:
-            try:
-                app_dir = Path(__file__).parent.resolve()
-            except NameError:
-                app_dir = Path.cwd()
-
-            orig_filename = Path(uploaded_file.name).name
-            # use a timestamped filename to avoid accidental overwrites while still saving only once per upload
-            timestamp = int(time.time())
-            safe_filename = f"{Path(orig_filename).stem}_{timestamp}{Path(orig_filename).suffix}"
-            save_path = app_dir / safe_filename
-
-            with open(save_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-
-            st.session_state.saved_file_path = str(save_path)
-            st.session_state.uploaded_file_name = uploaded_file.name
-            st.session_state.suggestions_generated = False  # Reset suggestions when new file is uploaded
-            st.session_state.query_suggestions = []
-            st.success(f"File '{orig_filename}' uploaded and saved to: {save_path.name}")
-        except Exception as e:
-            st.error(f"Failed to save file: {e}")
-            st.stop()
-    else:
-        save_path = Path(st.session_state.saved_file_path)
-        st.info(f"Using previously saved file: {save_path.name}")
-
-    # Load the DataFrame (and cache it in session_state so we don't re-read unnecessarily)
-    try:
-        save_path = Path(st.session_state.saved_file_path)
-        if st.session_state.last_loaded_path != str(save_path):
-            if save_path.suffix.lower() == ".csv":
-                df = pd.read_csv(save_path)
-            elif save_path.suffix.lower() in [".xls", ".xlsx"]:
-                df = pd.read_excel(save_path)
-            else:
-                df = pd.read_csv(save_path)
-
-            st.session_state.df = df
-            st.session_state.last_loaded_path = str(save_path)
-        else:
-            df = st.session_state.df
-    except Exception as e:
-        st.error(f"Could not read the uploaded file into a DataFrame: {e}")
-        st.stop()
+    save_path = save_uploaded_once(uploaded_file)
+    df = load_dataframe_from_saved()
 
     # --- Enhanced Basic file / data info ---
-    st.markdown("### 📈 Dataset Overview")
-    col1, col2, col3 = st.columns(3)
+    st.markdown("## 📈 Dataset Overview")
+    col1, col2 = st.columns(2)
     with col1:
         st.markdown("""
         <div class="metric-card">
             <h3 style="color: #667eea; margin: 0;">📊 Rows</h3>
-            <h2 style="margin: 5px 0;">{}</h2>
+            <h2 style="margin: 5px 0; color:#111827;">{}</h2>
         </div>
         """.format(len(df)), unsafe_allow_html=True)
     with col2:
         st.markdown("""
         <div class="metric-card">
             <h3 style="color: #667eea; margin: 0;">📋 Columns</h3>
-            <h2 style="margin: 5px 0;">{}</h2>
+            <h2 style="margin: 5px 0; color:#111827;">{}</h2>
         </div>
         """.format(len(df.columns)), unsafe_allow_html=True)
-    with col3:
-        st.markdown("""
-        <div class="metric-card">
-            <h3 style="color: #667eea; margin: 0;">📁 File</h3>
-            <h2 style="margin: 5px 0; font-size: 16px;">{}</h2>
-        </div>
-        """.format(Path(st.session_state.saved_file_path).name), unsafe_allow_html=True)
+    
 
     # --- Dropdown sections for Data View and Column Info ---
-    st.markdown("---")
+    st.markdown("")
     
     with st.expander("📊 Data View", expanded=False):
         st.markdown("### 📋 Data Preview")
@@ -245,7 +71,7 @@ if uploaded_file is not None:
 
     # --- Initialize Gemini chat session ---
     if st.session_state.chat_session is None:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = get_gemini_model('gemini-1.5-flash')
         data_context = f"""You are a helpful data analyst assistant specialized in analyzing tabular data.
 
 The user has uploaded a file with the following information:
@@ -284,230 +110,7 @@ IMPORTANT INSTRUCTIONS:
         m = re.search(rf"```{re.escape(tag)}\s*(.*?)\s*```", text, re.S)
         return m.group(1).strip() if m else ""
 
-    # Enhanced auto visualization with better logic and styling
-    def create_enhanced_chart(data, viz_hint, title="Data Visualization"):
-        cols = list(data.columns)
-        numeric_cols = data.select_dtypes(include=['number']).columns.tolist()
-        categorical_cols = data.select_dtypes(include=['object', 'category']).columns.tolist()
-        date_cols = data.select_dtypes(include=['datetime64']).columns.tolist()
-        
-        # Clean data first
-        data_clean = data.dropna()
-        
-        # Detect mentioned columns in the hint
-        mentioned_cols = [c for c in cols if re.search(rf"\b{re.escape(c)}\b", viz_hint, re.I)]
-        hint = viz_hint.lower()
-        
-        try:
-            # Bar chart logic
-            if any(word in hint for word in ['bar', 'column', 'count', 'frequency']):
-                if mentioned_cols and mentioned_cols[0] in categorical_cols:
-                    cat_col = mentioned_cols[0]
-                    if len(mentioned_cols) > 1 and mentioned_cols[1] in numeric_cols:
-                        # Categorical vs Numeric
-                        num_col = mentioned_cols[1]
-                        grouped_data = data_clean.groupby(cat_col)[num_col].sum().reset_index()
-                        chart = alt.Chart(grouped_data).mark_bar(
-                            color=alt.Gradient(
-                                gradient='linear',
-                                stops=[alt.GradientStop(color='#667eea', offset=0),
-                                      alt.GradientStop(color='#764ba2', offset=1)]
-                            ),
-                            cornerRadiusTopLeft=3,
-                            cornerRadiusTopRight=3
-                        ).encode(
-                            x=alt.X(f'{cat_col}:N', 
-                                  sort=alt.EncodingSortField(field=num_col, op='sum', order='descending'),
-                                  title=cat_col.replace('_', ' ').title()),
-                            y=alt.Y(f'{num_col}:Q', 
-                                  title=f'Total {num_col.replace("_", " ").title()}'),
-                            tooltip=[alt.Tooltip(f'{cat_col}:N'), 
-                                   alt.Tooltip(f'{num_col}:Q', format='.2f')]
-                        ).properties(
-                            width=600,
-                            height=400,
-                            title=alt.TitleParams(
-                                text=f'{num_col.replace("_", " ").title()} by {cat_col.replace("_", " ").title()}',
-                                fontSize=16,
-                                fontWeight='bold'
-                            )
-                        ).resolve_scale(color='independent')
-                        return chart
-                    else:
-                        # Count by category
-                        count_data = data_clean[cat_col].value_counts().reset_index()
-                        count_data.columns = [cat_col, 'count']
-                        chart = alt.Chart(count_data).mark_bar(
-                            color='#667eea',
-                            cornerRadiusTopLeft=3,
-                            cornerRadiusTopRight=3
-                        ).encode(
-                            x=alt.X(f'{cat_col}:N', sort='-y', title=cat_col.replace('_', ' ').title()),
-                            y=alt.Y('count:Q', title='Count'),
-                            tooltip=[alt.Tooltip(f'{cat_col}:N'), alt.Tooltip('count:Q')]
-                        ).properties(
-                            width=600,
-                            height=400,
-                            title=alt.TitleParams(
-                                text=f'Count by {cat_col.replace("_", " ").title()}',
-                                fontSize=16,
-                                fontWeight='bold'
-                            )
-                        )
-                        return chart
-            
-            # Line chart logic
-            if any(word in hint for word in ['line', 'trend', 'time', 'over time']):
-                if date_cols:
-                    date_col = date_cols[0]
-                elif categorical_cols:
-                    date_col = categorical_cols[0]
-                else:
-                    date_col = cols[0]
-                
-                if numeric_cols:
-                    num_col = mentioned_cols[0] if mentioned_cols and mentioned_cols[0] in numeric_cols else numeric_cols[0]
-                    
-                    # Try to parse date column
-                    try:
-                        data_clean[date_col] = pd.to_datetime(data_clean[date_col])
-                        sort_field = date_col
-                        x_type = 'T'
-                    except:
-                        sort_field = date_col
-                        x_type = 'N'
-                    
-                    chart = alt.Chart(data_clean).mark_line(
-                        point=alt.OverlayMarkDef(filled=False, fill='white', size=50),
-                        color='#667eea',
-                        strokeWidth=3
-                    ).encode(
-                        x=alt.X(f'{date_col}:{x_type}', title=date_col.replace('_', ' ').title()),
-                        y=alt.Y(f'{num_col}:Q', title=num_col.replace('_', ' ').title()),
-                        tooltip=[alt.Tooltip(f'{date_col}:{x_type}'), 
-                               alt.Tooltip(f'{num_col}:Q', format='.2f')]
-                    ).properties(
-                        width=600,
-                        height=400,
-                        title=alt.TitleParams(
-                            text=f'{num_col.replace("_", " ").title()} Trend',
-                            fontSize=16,
-                            fontWeight='bold'
-                        )
-                    )
-                    return chart
-            
-            # Histogram/Distribution
-            if any(word in hint for word in ['hist', 'distribution', 'spread']):
-                if numeric_cols:
-                    num_col = mentioned_cols[0] if mentioned_cols and mentioned_cols[0] in numeric_cols else numeric_cols[0]
-                    chart = alt.Chart(data_clean).mark_bar(
-                        color=alt.Gradient(
-                            gradient='linear',
-                            stops=[alt.GradientStop(color='#4facfe', offset=0),
-                                  alt.GradientStop(color='#00f2fe', offset=1)]
-                        ),
-                        cornerRadiusTopLeft=2,
-                        cornerRadiusTopRight=2
-                    ).encode(
-                        x=alt.X(f'{num_col}:Q', bin=alt.Bin(maxbins=30), 
-                               title=num_col.replace('_', ' ').title()),
-                        y=alt.Y('count()', title='Frequency'),
-                        tooltip=['count()']
-                    ).properties(
-                        width=600,
-                        height=400,
-                        title=alt.TitleParams(
-                            text=f'Distribution of {num_col.replace("_", " ").title()}',
-                            fontSize=16,
-                            fontWeight='bold'
-                        )
-                    )
-                    return chart
-            
-            # Scatter plot
-            if any(word in hint for word in ['scatter', 'correlation', 'relationship']):
-                if len(numeric_cols) >= 2:
-                    x_col = mentioned_cols[0] if mentioned_cols and mentioned_cols[0] in numeric_cols else numeric_cols[0]
-                    y_col = mentioned_cols[1] if len(mentioned_cols) > 1 and mentioned_cols[1] in numeric_cols else numeric_cols[1]
-                    
-                    chart = alt.Chart(data_clean).mark_circle(
-                        size=60,
-                        opacity=0.7,
-                        color='#667eea',
-                        stroke='white',
-                        strokeWidth=1
-                    ).encode(
-                        x=alt.X(f'{x_col}:Q', title=x_col.replace('_', ' ').title()),
-                        y=alt.Y(f'{y_col}:Q', title=y_col.replace('_', ' ').title()),
-                        tooltip=[alt.Tooltip(f'{x_col}:Q', format='.2f'), 
-                               alt.Tooltip(f'{y_col}:Q', format='.2f')]
-                    ).properties(
-                        width=600,
-                        height=400,
-                        title=alt.TitleParams(
-                            text=f'{x_col.replace("_", " ").title()} vs {y_col.replace("_", " ").title()}',
-                            fontSize=16,
-                            fontWeight='bold'
-                        )
-                    )
-                    return chart
-            
-            # Default: Smart chart based on data
-            if categorical_cols and numeric_cols:
-                cat_col = categorical_cols[0]
-                num_col = numeric_cols[0]
-                
-                if data_clean[cat_col].nunique() <= 10:  # Bar chart for few categories
-                    grouped_data = data_clean.groupby(cat_col)[num_col].mean().reset_index()
-                    chart = alt.Chart(grouped_data).mark_bar(
-                        color='#667eea',
-                        cornerRadiusTopLeft=3,
-                        cornerRadiusTopRight=3
-                    ).encode(
-                        x=alt.X(f'{cat_col}:N', sort='-y', title=cat_col.replace('_', ' ').title()),
-                        y=alt.Y(f'{num_col}:Q', title=f'Average {num_col.replace("_", " ").title()}'),
-                        tooltip=[alt.Tooltip(f'{cat_col}:N'), 
-                               alt.Tooltip(f'{num_col}:Q', format='.2f')]
-                    ).properties(
-                        width=600,
-                        height=400,
-                        title=alt.TitleParams(
-                            text=f'Average {num_col.replace("_", " ").title()} by {cat_col.replace("_", " ").title()}',
-                            fontSize=16,
-                            fontWeight='bold'
-                        )
-                    )
-                    return chart
-            
-            # Fallback: First numeric column histogram
-            if numeric_cols:
-                num_col = numeric_cols[0]
-                chart = alt.Chart(data_clean).mark_bar(
-                    color='#764ba2',
-                    cornerRadiusTopLeft=2,
-                    cornerRadiusTopRight=2
-                ).encode(
-                    x=alt.X(f'{num_col}:Q', bin=alt.Bin(maxbins=20), 
-                           title=num_col.replace('_', ' ').title()),
-                    y=alt.Y('count()', title='Count'),
-                    tooltip=['count()']
-                ).properties(
-                    width=600,
-                    height=400,
-                    title=alt.TitleParams(
-                        text=f'Distribution of {num_col.replace("_", " ").title()}',
-                        fontSize=16,
-                        fontWeight='bold'
-                    )
-                )
-                return chart
-                
-        except Exception as e:
-            st.error(f"Error creating chart: {str(e)}")
-            return None
-        
-        return None
+    # Visualization is provided by Client.services.viz.create_enhanced_chart
 
     # Enhanced export dropdown component
     def create_export_dropdown(displayed_df, button_key_prefix):
@@ -603,7 +206,7 @@ IMPORTANT INSTRUCTIONS:
         if st.button("📖 Get Detailed Explanation", key=button_key, use_container_width=False):
             with st.spinner("Generating detailed explanation..."):
                 try:
-                    explanation_model = genai.GenerativeModel('gemini-1.5-flash')
+                    explanation_model = get_gemini_model('gemini-1.5-flash')
                     
                     if is_current and displayed_df is not None:
                         # Convert DataFrame to a list of dictionaries for more detailed context
@@ -698,10 +301,9 @@ Provide only the explanation, no code blocks."""
             st.error(f"Error: {str(e)}")
 
     # --- Query Suggestions Section (Moved to top, after data overview) ---
-    st.markdown("---")
     st.markdown('<div class="suggestions-section">', unsafe_allow_html=True)
     st.markdown("## 💡 AI Query Suggestions")
-    st.markdown("*Get AI-powered suggestions for analyzing your data*")
+    st.markdown("*Click to auto-run a suggested query*")
     
     with st.container():
         # Generate suggestions button
@@ -711,7 +313,7 @@ Provide only the explanation, no code blocks."""
             if st.button("🔍 Generate Query Suggestions", disabled=st.session_state.suggestions_generated, use_container_width=True):
                 with st.spinner("🤖 Generating intelligent query suggestions..."):
                     try:
-                        suggestion_model = genai.GenerativeModel('gemini-1.5-flash')
+                        suggestion_model = get_gemini_model('gemini-1.5-flash')
                         
                         # Get column info for context
                         numeric_cols_list = df.select_dtypes(include=['number']).columns.tolist()
@@ -798,8 +400,7 @@ Return ONLY the queries, one per line, no numbering or bullets."""
     st.markdown('</div>', unsafe_allow_html=True)
 
     # --- Enhanced Gemini chat section ---
-    st.markdown("---")
-    st.markdown("# 🤖 Conversation History")
+    st.markdown("## 🤖 Conversation History")
 
     # Handle suggestion selection (before chat input)
     if hasattr(st.session_state, 'selected_suggestion') and not st.session_state.processing_suggestion:
@@ -831,7 +432,6 @@ Return ONLY the queries, one per line, no numbering or bullets."""
                     render_response_content(message["content"], i, is_current=False)
 
     # --- Query Input Section (Moved to bottom) ---
-    st.markdown("---")
     st.markdown("## ✏️ Ask a Question")
     st.markdown("*Type your question about the data below*")
     
@@ -847,7 +447,6 @@ Return ONLY the queries, one per line, no numbering or bullets."""
             process_query(prompt)
 
     # Clear chat & resets (moved to complete bottom)
-    st.markdown("---")
     st.markdown("## 🗑️ Reset Options")
     col_clear, col_spacer = st.columns([2, 8])
     with col_clear:
