@@ -1,0 +1,11 @@
+OrderID,OrderDate,Region,Product,Category,Sales,Quantity,Customer,Channel
+1001,2024-01-15,North,Widget A,Widgets,1200,10,Acme Corp,Online
+1002,2024-01-18,West,Gadget B,Gadgets,2400,15,Zenith Inc,Retail
+1003,2024-02-05,East,Widget A,Widgets,1100,9,Logi LLC,Retail
+1004,2024-02-20,South,Widget C,Widgets,1800,10,Pinnacle Ltd,Online
+1005,2024-03-03,North,Gadget B,Gadgets,2100,11,Acme Corp,Retail
+1006,2024-03-12,West,Widget A,Widgets,1500,12,Zenith Inc,Online
+1007,2024-04-07,East,Gadget C,Gadgets,1750,10,Logi LLC,Online
+1008,2024-04-25,South,Widget B,Widgets,1250,8,Pinnacle Ltd,Retail
+1009,2024-05-14,North,Gadget C,Gadgets,2200,14,Acme Corp,Retail
+1010,2024-05-28,West,Widget C,Widgets,1900,13,Zenith Inc,Online
